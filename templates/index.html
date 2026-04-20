@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Employee Daily Hours Report</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f5f6fa;
+            margin: 0;
+            padding: 0;
+        }
+        .wrapper {
+            max-width: 720px;
+            margin: 60px auto;
+            background: #ffffff;
+            padding: 30px;
+            border-radius: 14px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+        }
+        h1 {
+            margin-top: 0;
+            font-size: 28px;
+            color: #222;
+        }
+        p {
+            color: #555;
+            line-height: 1.5;
+        }
+        .field {
+            margin-bottom: 18px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #222;
+        }
+        input[type="file"],
+        input[type="date"],
+        select,
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #d9d9d9;
+            border-radius: 8px;
+            box-sizing: border-box;
+            background: #fff;
+            font-size: 14px;
+        }
+        .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        .btn {
+            background: #4f46e5;
+            color: #fff;
+            border: none;
+            padding: 14px 18px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+        }
+        .btn:hover {
+            background: #4338ca;
+        }
+        .note {
+            margin-top: 20px;
+            font-size: 14px;
+            color: #666;
+            background: #f8f9ff;
+            padding: 14px;
+            border-radius: 8px;
+        }
+        .flash {
+            background: #ffe7e7;
+            color: #b00020;
+            padding: 12px 14px;
+            border-radius: 8px;
+            margin-bottom: 18px;
+        }
+        .site-section {
+            margin-bottom: 20px;
+            padding: 14px;
+            background: #f8f9ff;
+            border-radius: 8px;
+            border: 1px solid #e5e7eb;
+        }
+        .site-controls {
+            display: flex;
+            gap: 8px;
+        }
+        .site-controls input {
+            flex: 1;
+        }
+        .btn-small {
+            background: #4f46e5;
+            color: #fff;
+            border: none;
+            padding: 10px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        .btn-small:hover {
+            background: #4338ca;
+        }
+        .btn-danger {
+            background: #dc2626;
+            padding: 6px 10px;
+            font-size: 12px;
+        }
+        .btn-danger:hover {
+            background: #b91c1c;
+        }
+        .sites-list {
+            margin-top: 10px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .site-tag {
+            background: #fff;
+            border: 1px solid #d1d5db;
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        ul {
+            padding-left: 18px;
+            margin: 8px 0 0 0;
+        }
+        @media (max-width: 640px) {
+            .wrapper {
+                margin: 20px;
+                padding: 20px;
+            }
+            .row {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="wrapper">
+        <h1>Employee Daily Hours Report</h1>
+        <p>
+            Upload the attendance Excel file, choose an optional date range,
+            and download a new Excel report.
+        </p>
+
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                {% for message in messages %}
+                    <div class="flash">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="site-section">
+            <label for="site">Site *</label>
+            <div class="site-controls">
+                <select id="site" name="site" required>
+                    <option value="">-- Choose a site --</option>
+                </select>
+                <button type="button" class="btn-small" onclick="showAddSiteForm()">+ Add Site</button>
+            </div>
+            <div id="addSiteForm" style="display: none; margin-top: 10px;">
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" id="newSiteName" placeholder="Enter new site name" />
+                    <button type="button" class="btn-small" onclick="addSite()">Add</button>
+                    <button type="button" class="btn-small" style="background: #6b7280;" onclick="hideAddSiteForm()">Cancel</button>
+                </div>
+            </div>
+            <div class="sites-list" id="sitesList"></div>
+        </div>
+
+        <form method="POST" enctype="multipart/form-data">
+            <input type="hidden" id="siteInput" name="site" required>
+            <div class="field">
+                <label for="file">Excel File</label>
+                <input type="file" id="file" name="file" accept=".xlsx,.xls" required>
+            </div>
+
+            <div class="row">
+                <div class="field">
+                    <label for="start_date">Start Date</label>
+                    <input type="date" id="start_date" name="start_date">
+                </div>
+                <div class="field">
+                    <label for="end_date">End Date</label>
+                    <input type="date" id="end_date" name="end_date">
+                </div>
+            </div>
+
+            <button type="submit" class="btn">Generate Report</button>
+        </form>
+
+        <script>
+            let allSites = [];
+
+            function loadSites() {
+                fetch('/api/sites')
+                    .then(r => r.json())
+                    .then(sites => {
+                        allSites = sites;
+                        renderSites();
+                    });
+            }
+
+            function renderSites() {
+                const select = document.getElementById('site');
+                const listDiv = document.getElementById('sitesList');
+
+                select.innerHTML = '<option value="">-- Choose a site --</option>';
+                allSites.forEach(site => {
+                    const opt = document.createElement('option');
+                    opt.value = site;
+                    opt.textContent = site;
+                    select.appendChild(opt);
+                });
+
+                listDiv.innerHTML = '';
+                allSites.forEach(site => {
+                    const tag = document.createElement('div');
+                    tag.className = 'site-tag';
+                    tag.innerHTML = `
+                        ${site}
+                        <button type="button" class="btn-danger" onclick="deleteSite('${site.replace(/'/g, "\\'")}')">×</button>
+                    `;
+                    listDiv.appendChild(tag);
+                });
+            }
+
+            function showAddSiteForm() {
+                document.getElementById('addSiteForm').style.display = 'block';
+                document.getElementById('newSiteName').focus();
+            }
+
+            function hideAddSiteForm() {
+                document.getElementById('addSiteForm').style.display = 'none';
+                document.getElementById('newSiteName').value = '';
+            }
+
+            function addSite() {
+                const name = document.getElementById('newSiteName').value.trim();
+                if (!name) {
+                    alert('Please enter a site name');
+                    return;
+                }
+
+                fetch('/api/sites', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) {
+                        alert('Error: ' + data.error);
+                    } else {
+                        allSites = data.sites;
+                        renderSites();
+                        hideAddSiteForm();
+                    }
+                });
+            }
+
+            function deleteSite(name) {
+                if (!confirm('Delete site: ' + name + '?')) return;
+
+                fetch('/api/sites/' + encodeURIComponent(name), { method: 'DELETE' })
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.error) {
+                            alert('Error: ' + data.error);
+                        } else {
+                            allSites = data.sites;
+                            renderSites();
+                        }
+                    });
+            }
+
+            document.getElementById('site').addEventListener('change', function() {
+                document.getElementById('siteInput').value = this.value;
+            });
+
+            loadSites();
+        </script>
+
+        <div class="note">
+            <strong>Rules:</strong>
+            <ul>
+                <li>Uses only <strong>Access Granted by Face</strong></li>
+                <li>Multiple authentications within <strong>30 minutes</strong> are treated as one cluster</li>
+                <li>First register = first cluster start of the day</li>
+                <li>Last register = last cluster end of the day</li>
+                <li>Night report starts from first cluster between <strong>18:00 and 23:59</strong></li>
+                <li>The output file includes <strong>Daily Summary</strong>, <strong>Clustered Events</strong>, <strong>Raw Access Auth</strong>, and <strong>Report Days</strong></li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
