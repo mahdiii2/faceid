@@ -1,3 +1,4 @@
+import re
 import uuid
 import zipfile
 import json
@@ -122,11 +123,10 @@ def build_clusters(group: pd.DataFrame, gap_minutes: int = 30) -> pd.DataFrame:
 
 def round_checkin_time(dt_value: pd.Timestamp) -> pd.Timestamp:
     """
-    Rounding rule:
+    Rounding rule (only applied for hours 6-23, not midnight/early hours):
     - 06:30 to 07:34 => 07:00
     - 07:35 to 08:35 => 08:00
-    - 08:36 to 09:35 => 09:00
-    and so on
+    and so on. Times before 06:00 are returned as-is.
     """
     if pd.isna(dt_value):
         return pd.NaT
@@ -134,6 +134,10 @@ def round_checkin_time(dt_value: pd.Timestamp) -> pd.Timestamp:
     rounded = dt_value.replace(second=0, microsecond=0)
     hour = rounded.hour
     minute = rounded.minute
+
+    # Don't round early-morning / overnight times
+    if hour < 6:
+        return rounded
 
     if hour == 6 and minute >= 30:
         return rounded.replace(hour=7, minute=0)
@@ -237,7 +241,7 @@ def summarize_day(group: pd.DataFrame) -> pd.Series:
     group = group.sort_values("Cluster_Start").copy()
 
     first_event = group["Cluster_Start"].min()
-    last_event = group["Cluster_Start"].max()
+    last_event = group["Cluster_End"].max()
 
     rounded_first_register = round_checkin_time(first_event)
     total_hours, used_events = calculate_total_hours_and_used_events(group)
@@ -334,15 +338,163 @@ def process_attendance_excel(file_stream, start_date=None, end_date=None):
     daily_export = daily_summary.copy()
     daily_export["Date"] = pd.to_datetime(daily_export["Date"]).dt.strftime("%Y-%m-%d")
 
-    for col in ["First Register", "Last Register"]:
-        daily_export[col] = format_dt_series(daily_export[col])
+    # Keep as datetime objects so round-trip (read/write) preserves correct timestamps
+    daily_export["First Register"] = pd.to_datetime(daily_export["First Register"], errors="coerce")
+    daily_export["Last Register"] = pd.to_datetime(daily_export["Last Register"], errors="coerce")
 
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    with pd.ExcelWriter(output, engine="xlsxwriter", datetime_format="yyyy-mm-dd hh:mm:ss") as writer:
         daily_export.to_excel(writer, sheet_name="Daily Summary", index=False)
 
     output.seek(0)
     return output
+
+
+def parse_excel_timestamp(val):
+    """Robustly parse a cell value into a pd.Timestamp. Handles:
+    - Native datetime/Timestamp objects
+    - Excel serial numbers (floats like 46098.917)
+    - US-style strings like '3/14/2026 10:00:00'
+    - ISO strings like '2026-03-14 10:00:00'
+    """
+    if val is None:
+        return pd.NaT
+    try:
+        if pd.isna(val):
+            return pd.NaT
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(val, pd.Timestamp):
+        return val
+    if isinstance(val, datetime):
+        return pd.Timestamp(val)
+
+    if isinstance(val, (int, float)):
+        if val > 20000:  # Excel serial number range for modern dates
+            return pd.to_datetime(val, unit="D", origin="1899-12-30", errors="coerce")
+        return pd.NaT
+
+    s = str(val).strip().lstrip("'").strip()
+    s = re.sub(r'\s+', ' ', s)  # normalize whitespace (incl. non-breaking spaces)
+    s = s.replace('\u00A0', ' ').replace('\u2009', ' ')
+    if not s or s.lower() in ("nan", "nat", "none", ""):
+        return pd.NaT
+
+    ts = pd.to_datetime(s, errors="coerce")
+    if pd.notna(ts):
+        return ts
+
+    ts = pd.to_datetime(s, errors="coerce", dayfirst=True)
+    if pd.notna(ts):
+        return ts
+
+    for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y",
+                "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+                "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %I:%M %p"):
+        ts = pd.to_datetime(s, format=fmt, errors="coerce")
+        if pd.notna(ts):
+            return ts
+
+    m = re.search(r'(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})\s*(\d{1,2})?:?(\d{2})?:?(\d{2})?', s)
+    if m:
+        try:
+            mo, dy = int(m.group(1)), int(m.group(2))
+            yr = int(m.group(3))
+            if yr < 100:
+                yr += 2000
+            hr = int(m.group(4)) if m.group(4) else 0
+            mi = int(m.group(5)) if m.group(5) else 0
+            se = int(m.group(6)) if m.group(6) else 0
+            if mo > 12 and dy <= 12:
+                mo, dy = dy, mo
+            return pd.Timestamp(year=yr, month=mo, day=dy, hour=hr, minute=mi, second=se)
+        except (ValueError, TypeError):
+            pass
+    return pd.NaT
+
+
+def find_multi_site_employees(files_data):
+    """
+    For each employee+date appearing in more than one site, compare ALL timestamps
+    (both First Register and Last Register) from every site to find the true
+    earliest check-in and latest check-out across all posts.
+    files_data: list of tuples (site_name, dataframe)
+    """
+    from datetime import time as dtime
+
+    MIN_VALID = pd.Timestamp("2000-01-01")
+
+    def parse_ts(val):
+        ts = parse_excel_timestamp(val)
+        if pd.isna(ts) or ts < MIN_VALID:
+            return pd.NaT
+        return ts
+
+    all_names = set()
+    all_dates = set()
+    for _, df in files_data:
+        all_names |= set(df["Name"].dropna().astype(str).unique())
+        all_dates |= set(df["Date"].dropna().unique())
+
+    results = []
+
+    for name in sorted(all_names):
+        if not name or name == "nan":
+            continue
+        for date_val in sorted(all_dates):
+            # Collect every valid timestamp from every site for this employee+date
+            all_timestamps = []  # list of (timestamp, site_name)
+
+            sites_seen = set()
+            for site_name, df in files_data:
+                row = df[(df["Name"].astype(str) == name) & (df["Date"] == date_val)]
+                if row.empty:
+                    continue
+                sites_seen.add(site_name)
+
+                first_ts = parse_ts(row["First Register"].iloc[0])
+                last_ts = parse_ts(row["Last Register"].iloc[0])
+
+                if pd.notna(first_ts):
+                    all_timestamps.append((first_ts, site_name))
+                if pd.notna(last_ts) and last_ts != first_ts:
+                    all_timestamps.append((last_ts, site_name))
+                # If only one entry, first==last — include at least one
+                if pd.notna(first_ts) and last_ts == first_ts:
+                    pass  # already added first_ts above
+
+            if len(sites_seen) < 2:
+                continue  # only in one site, not an anomaly
+
+            if not all_timestamps:
+                continue
+
+            all_timestamps.sort(key=lambda x: x[0])
+
+            checkin_time, checkin_site = all_timestamps[0]
+            checkout_time, checkout_site = all_timestamps[-1]
+
+            if checkout_time <= checkin_time:
+                total_hours = ""
+            else:
+                raw = (checkout_time - checkin_time).total_seconds() / 3600
+                lunch = overlap_hours(checkin_time, checkout_time, dtime(12, 0), dtime(13, 0))
+                evening = overlap_hours(checkin_time, checkout_time, dtime(17, 0), dtime(18, 0))
+                total_hours = round(max(0, raw - lunch - evening), 2)
+
+            results.append({
+                "Name": name,
+                "Date": str(date_val),
+                "Check-In Post": checkin_site,
+                "Check-In Time": checkin_time.strftime("%H:%M"),
+                "Check-Out Post": checkout_site,
+                "Check-Out Time": checkout_time.strftime("%H:%M"),
+                "Total Hours": total_hours,
+            })
+
+    return pd.DataFrame(results) if results else pd.DataFrame()
 
 
 @app.route("/api/sites", methods=["GET"])
@@ -415,7 +567,8 @@ def index():
                 end_date=end_date,
             )
 
-            download_name = f"employee_daily_summary_{uuid.uuid4().hex[:8]}.xlsx"
+            today = datetime.now().strftime("%Y-%m-%d")
+            download_name = f"employee_daily_summary_{site}_{today}.xlsx"
 
             return send_file(
                 result_file,
@@ -429,6 +582,92 @@ def index():
             return redirect(url_for("index"))
 
     return render_template("index.html", sites=get_sites())
+
+
+@app.route("/compare-sites", methods=["GET", "POST"])
+def compare_sites():
+    if request.method == "POST":
+        if "files" not in request.files or len(request.files.getlist("files")) == 0:
+            flash("Please upload at least one Excel file.")
+            return redirect(url_for("compare_sites"))
+
+        files = request.files.getlist("files")
+        files_data = []
+
+        try:
+            for file in files:
+                if not file or not file.filename:
+                    continue
+
+                if not file.filename.lower().endswith((".xlsx", ".xls")):
+                    flash(f"Invalid file: {file.filename}. Only .xlsx and .xls are allowed.")
+                    return redirect(url_for("compare_sites"))
+
+                fname = re.sub(r'\.(xlsx|xls)$', '', file.filename, flags=re.IGNORECASE)
+                fname = re.sub(r'^employee_daily_summary_', '', fname)
+                fname = re.sub(r'_\d{4}-\d{2}-\d{2}$', '', fname)
+                site_name = fname if fname else "Unknown"
+                file_bytes = BytesIO(file.read())
+                clean_bytes = _sanitize_xlsx(file_bytes)
+                df = pd.read_excel(clean_bytes, engine="openpyxl", sheet_name="Daily Summary")
+                df = normalize_column_names(df)
+
+                if "Date" in df.columns:
+                    df["Date"] = pd.to_datetime(df["Date"]).dt.date
+
+                files_data.append((site_name, df))
+
+            if not files_data:
+                flash("No valid files to process.")
+                return redirect(url_for("compare_sites"))
+
+            anomalies_df = find_multi_site_employees(files_data)
+
+            # (Don't early-return on empty anomalies — we want debug info either way)
+
+            # Build debug info: raw parsed data from each file
+            debug_rows = []
+            for site_name, df in files_data:
+                for _, r in df.iterrows():
+                    fr = r.get("First Register", "")
+                    lr = r.get("Last Register", "")
+                    debug_rows.append({
+                        "Site": site_name,
+                        "Name": r.get("Name", ""),
+                        "Date": r.get("Date", ""),
+                        "FR type": type(fr).__name__,
+                        "FR raw repr": repr(fr)[:60],
+                        "FR parsed": str(parse_excel_timestamp(fr)),
+                        "LR type": type(lr).__name__,
+                        "LR raw repr": repr(lr)[:60],
+                        "LR parsed": str(parse_excel_timestamp(lr)),
+                    })
+            debug_df = pd.DataFrame(debug_rows)
+
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                if anomalies_df.empty:
+                    pd.DataFrame([{"Message": "No employees found crossing sites on the same day"}]).to_excel(
+                        writer, sheet_name="Multi-Site Anomalies", index=False)
+                else:
+                    anomalies_df.to_excel(writer, sheet_name="Multi-Site Anomalies", index=False)
+                debug_df.to_excel(writer, sheet_name="Debug - Raw Parsed Data", index=False)
+
+            output.seek(0)
+            download_name = f"multi_site_anomalies_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+
+            return send_file(
+                output,
+                as_attachment=True,
+                download_name=download_name,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+        except Exception as e:
+            flash(f"Error: {str(e)}")
+            return redirect(url_for("compare_sites"))
+
+    return render_template("compare_sites.html")
 
 
 if __name__ == "__main__":
