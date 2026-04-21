@@ -135,7 +135,6 @@ def round_checkin_time(dt_value: pd.Timestamp) -> pd.Timestamp:
     hour = rounded.hour
     minute = rounded.minute
 
-    # Don't round early-morning / overnight times
     if hour < 6:
         return rounded
 
@@ -173,10 +172,6 @@ def calculate_total_hours_and_used_events(group: pd.DataFrame):
     3rd = IN
     4th = OUT
     ...
-
-    Returns:
-    - total hours
-    - text showing which pairs were used
     """
     ordered_events = list(group["Cluster_Start"].sort_values())
 
@@ -337,8 +332,6 @@ def process_attendance_excel(file_stream, start_date=None, end_date=None):
 
     daily_export = daily_summary.copy()
     daily_export["Date"] = pd.to_datetime(daily_export["Date"]).dt.strftime("%Y-%m-%d")
-
-    # Keep as datetime objects so round-trip (read/write) preserves correct timestamps
     daily_export["First Register"] = pd.to_datetime(daily_export["First Register"], errors="coerce")
     daily_export["Last Register"] = pd.to_datetime(daily_export["Last Register"], errors="coerce")
 
@@ -351,12 +344,6 @@ def process_attendance_excel(file_stream, start_date=None, end_date=None):
 
 
 def parse_excel_timestamp(val):
-    """Robustly parse a cell value into a pd.Timestamp. Handles:
-    - Native datetime/Timestamp objects
-    - Excel serial numbers (floats like 46098.917)
-    - US-style strings like '3/14/2026 10:00:00'
-    - ISO strings like '2026-03-14 10:00:00'
-    """
     if val is None:
         return pd.NaT
     try:
@@ -371,12 +358,12 @@ def parse_excel_timestamp(val):
         return pd.Timestamp(val)
 
     if isinstance(val, (int, float)):
-        if val > 20000:  # Excel serial number range for modern dates
+        if val > 20000:
             return pd.to_datetime(val, unit="D", origin="1899-12-30", errors="coerce")
         return pd.NaT
 
     s = str(val).strip().lstrip("'").strip()
-    s = re.sub(r'\s+', ' ', s)  # normalize whitespace (incl. non-breaking spaces)
+    s = re.sub(r'\s+', ' ', s)
     s = s.replace('\u00A0', ' ').replace('\u2009', ' ')
     if not s or s.lower() in ("nan", "nat", "none", ""):
         return pd.NaT
@@ -389,10 +376,12 @@ def parse_excel_timestamp(val):
     if pd.notna(ts):
         return ts
 
-    for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y",
-                "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
-                "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
-                "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %I:%M %p"):
+    for fmt in (
+        "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y",
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+        "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %I:%M %p"
+    ):
         ts = pd.to_datetime(s, format=fmt, errors="coerce")
         if pd.notna(ts):
             return ts
@@ -415,12 +404,44 @@ def parse_excel_timestamp(val):
     return pd.NaT
 
 
+def parse_total_hours_value(val):
+    if val is None:
+        return 0.0
+    try:
+        if pd.isna(val):
+            return 0.0
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(val, (int, float)):
+        return float(val)
+
+    s = str(val).strip()
+    if not s:
+        return 0.0
+
+    s = s.replace(",", ".")
+    m = re.search(r'-?\d+(?:\.\d+)?', s)
+    if not m:
+        return 0.0
+
+    try:
+        return float(m.group())
+    except ValueError:
+        return 0.0
+
+
+def has_positive_total_hours(row) -> bool:
+    return parse_total_hours_value(row.get("Total Hours", 0)) > 0
+
 def find_multi_site_employees(files_data):
     """
-    For each employee+date appearing in more than one site, compare ALL timestamps
-    (both First Register and Last Register) from every site to find the true
-    earliest check-in and latest check-out across all posts.
-    files_data: list of tuples (site_name, dataframe)
+    Rule:
+    - If Total Hours > 0 for a name+date in any uploaded file,
+      that means the employee already has valid IN/OUT for that day,
+      so DO NOT report anomaly.
+    - Only when Total Hours is empty or 0 do we check for anomaly
+      for that same name+date across the uploaded files.
     """
     from datetime import time as dtime
 
@@ -443,30 +464,40 @@ def find_multi_site_employees(files_data):
     for name in sorted(all_names):
         if not name or name == "nan":
             continue
+
         for date_val in sorted(all_dates):
-            # Collect every valid timestamp from every site for this employee+date
-            all_timestamps = []  # list of (timestamp, site_name)
-
+            matched_rows = []
             sites_seen = set()
-            for site_name, df in files_data:
-                row = df[(df["Name"].astype(str) == name) & (df["Date"] == date_val)]
-                if row.empty:
-                    continue
-                sites_seen.add(site_name)
+            has_positive_total_hours = False
 
-                first_ts = parse_ts(row["First Register"].iloc[0])
-                last_ts = parse_ts(row["Last Register"].iloc[0])
+            for site_name, df in files_data:
+                rows = df[(df["Name"].astype(str) == name) & (df["Date"] == date_val)]
+                if rows.empty:
+                    continue
+
+                for _, row in rows.iterrows():
+                    matched_rows.append((site_name, row))
+                    sites_seen.add(site_name)
+
+                    if parse_total_hours_value(row.get("Total Hours", 0)) > 0:
+                        has_positive_total_hours = True
+
+            if len(sites_seen) < 2:
+                continue
+
+            # Important: if any file already has valid Total Hours > 0, skip anomaly
+            if has_positive_total_hours:
+                continue
+
+            all_timestamps = []
+            for site_name, row in matched_rows:
+                first_ts = parse_ts(row.get("First Register", ""))
+                last_ts = parse_ts(row.get("Last Register", ""))
 
                 if pd.notna(first_ts):
                     all_timestamps.append((first_ts, site_name))
                 if pd.notna(last_ts) and last_ts != first_ts:
                     all_timestamps.append((last_ts, site_name))
-                # If only one entry, first==last — include at least one
-                if pd.notna(first_ts) and last_ts == first_ts:
-                    pass  # already added first_ts above
-
-            if len(sites_seen) < 2:
-                continue  # only in one site, not an anomaly
 
             if not all_timestamps:
                 continue
@@ -495,8 +526,6 @@ def find_multi_site_employees(files_data):
             })
 
     return pd.DataFrame(results) if results else pd.DataFrame()
-
-
 @app.route("/api/sites", methods=["GET"])
 def api_get_sites():
     return jsonify(get_sites())
@@ -607,6 +636,7 @@ def compare_sites():
                 fname = re.sub(r'^employee_daily_summary_', '', fname)
                 fname = re.sub(r'_\d{4}-\d{2}-\d{2}$', '', fname)
                 site_name = fname if fname else "Unknown"
+
                 file_bytes = BytesIO(file.read())
                 clean_bytes = _sanitize_xlsx(file_bytes)
                 df = pd.read_excel(clean_bytes, engine="openpyxl", sheet_name="Daily Summary")
@@ -623,18 +653,18 @@ def compare_sites():
 
             anomalies_df = find_multi_site_employees(files_data)
 
-            # (Don't early-return on empty anomalies — we want debug info either way)
-
-            # Build debug info: raw parsed data from each file
             debug_rows = []
             for site_name, df in files_data:
                 for _, r in df.iterrows():
                     fr = r.get("First Register", "")
                     lr = r.get("Last Register", "")
+                    th = r.get("Total Hours", "")
                     debug_rows.append({
                         "Site": site_name,
                         "Name": r.get("Name", ""),
                         "Date": r.get("Date", ""),
+                        "Total Hours Raw": th,
+                        "Total Hours Parsed": parse_total_hours_value(th),
                         "FR type": type(fr).__name__,
                         "FR raw repr": repr(fr)[:60],
                         "FR parsed": str(parse_excel_timestamp(fr)),
@@ -651,6 +681,7 @@ def compare_sites():
                         writer, sheet_name="Multi-Site Anomalies", index=False)
                 else:
                     anomalies_df.to_excel(writer, sheet_name="Multi-Site Anomalies", index=False)
+
                 debug_df.to_excel(writer, sheet_name="Debug - Raw Parsed Data", index=False)
 
             output.seek(0)
