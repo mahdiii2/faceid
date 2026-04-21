@@ -20,27 +20,32 @@
             --gray-500: #6b7280;
             --gray-700: #374151;
             --gray-900: #111827;
-            --radius: 12px;
+            --radius: 16px;
+            --radius-lg: 22px;
             --shadow: 0 4px 6px -1px rgba(0,0,0,.07), 0 2px 4px -1px rgba(0,0,0,.04);
             --shadow-lg: 0 20px 40px rgba(0,0,0,.1);
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: var(--gray-50);
+            font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: radial-gradient(circle at top right, #eef2ff, #f8fafc 45%, #f3f4f6 100%);
             min-height: 100vh;
             color: var(--gray-900);
+            line-height: 1.45;
         }
 
         /* NAV */
         nav {
-            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+            background: linear-gradient(135deg, #312e81 0%, #5b21b6 45%, #7c3aed 100%);
             padding: 0 24px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            height: 60px;
-            box-shadow: 0 2px 8px rgba(79,70,229,.3);
+            height: 64px;
+            box-shadow: 0 14px 30px rgba(76, 29, 149, .28);
+            position: sticky;
+            top: 0;
+            z-index: 4;
         }
         .nav-brand {
             display: flex;
@@ -65,27 +70,29 @@
         .nav-link.active { background: rgba(255,255,255,.2); color: #fff; }
 
         /* LAYOUT */
-        .page { max-width: 780px; margin: 40px auto; padding: 0 20px 60px; }
+        .page { max-width: 900px; margin: 36px auto; padding: 0 20px 60px; }
 
-        .page-header { margin-bottom: 28px; }
-        .page-header h1 { font-size: 26px; font-weight: 700; color: var(--gray-900); }
+        .page-header { margin-bottom: 28px; padding: 22px 24px; background: rgba(255,255,255,.74); border: 1px solid rgba(255,255,255,.8); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); backdrop-filter: blur(8px); }
+        .page-header h1 { font-size: 29px; font-weight: 800; color: var(--gray-900); letter-spacing: -.4px; }
         .page-header p { margin-top: 6px; color: var(--gray-500); font-size: 14px; line-height: 1.6; }
 
         /* CARD */
         .card {
-            background: #fff;
+            background: rgba(255,255,255,.88);
             border-radius: var(--radius);
-            box-shadow: var(--shadow);
-            border: 1px solid var(--gray-200);
+            box-shadow: 0 10px 32px rgba(17,24,39,.08);
+            border: 1px solid rgba(99,102,241,.12);
             overflow: hidden;
             margin-bottom: 20px;
+            backdrop-filter: blur(6px);
         }
         .card-header {
             padding: 16px 20px;
-            border-bottom: 1px solid var(--gray-100);
+            border-bottom: 1px solid rgba(99,102,241,.12);
             display: flex;
             align-items: center;
             gap: 10px;
+            background: linear-gradient(135deg, rgba(99,102,241,.07), rgba(124,58,237,.04));
         }
         .card-header h2 { font-size: 15px; font-weight: 600; color: var(--gray-900); }
         .card-icon {
@@ -181,12 +188,13 @@
             transition: all .15s;
         }
         .btn-primary {
-            background: linear-gradient(135deg, var(--primary) 0%, #7c3aed 100%);
+            background: linear-gradient(135deg, #4338ca 0%, #7c3aed 60%, #a855f7 100%);
             color: #fff;
             width: 100%;
             padding: 13px;
             font-size: 15px;
-            box-shadow: 0 4px 12px rgba(99,102,241,.35);
+            border-radius: 12px;
+            box-shadow: 0 10px 22px rgba(99,102,241,.35);
         }
         .btn-primary:hover {
             transform: translateY(-1px);
@@ -354,6 +362,7 @@
 
 <div class="page">
     <div class="page-header">
+        <div style="display:inline-flex;align-items:center;gap:8px;padding:5px 10px;border-radius:999px;background:#eef2ff;color:#4338ca;font-size:12px;font-weight:700;margin-bottom:10px;">✨ Fresh UI</div>
         <h1>Generate Attendance Report</h1>
         <p>Select a site, upload the attendance Excel file, and download the processed daily hours report.</p>
     </div>
